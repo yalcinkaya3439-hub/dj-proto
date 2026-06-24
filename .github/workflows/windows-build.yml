@@ -15,52 +15,64 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up MSVC (VS 2022)
+      - name: Set up MSVC developer environment (VS 2022 x64)
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+          vsversion: "2022"
 
-      - name: Install CMake & Ninja
-        uses: lukka/get-cmake@latest
-
-      - name: Configure
+      - name: Configure (Ninja + MSVC)
+        shell: cmd
         run: |
-          cmake -S . -B build `
-            -G "Visual Studio 17 2022" `
-            -A x64 `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DDJCORE_BUILD_TESTS=ON `
+          cmake -S . -B build ^
+            -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_C_COMPILER=cl ^
+            -DCMAKE_CXX_COMPILER=cl ^
+            -DDJCORE_BUILD_TESTS=ON ^
             -DDJAPP_BUILD=ON
 
       - name: Build
-        run: cmake --build build --config Release --parallel
+        shell: cmd
+        run: cmake --build build --parallel
 
       - name: Run Core Tests on Windows
+        shell: cmd
         working-directory: build
-        run: ctest -C Release --output-on-failure --parallel 4
+        run: ctest --output-on-failure --parallel 4
 
       - name: Locate EXE
         id: find_exe
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Recurse build\app\Release\*.exe | Select-Object -First 1
-          if (-not $exe) { $exe = Get-ChildItem -Recurse build\*.exe | Select-Object -First 1 }
-          echo "EXE path: $($exe.FullName)"
-          echo "exe_path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+          $exe = Get-ChildItem -Recurse build -Filter *.exe |
+                   Where-Object { $_.Name -notlike "*tests*" } |
+                   Select-Object -First 1
+          if ($exe) {
+            Write-Host "EXE found: $($exe.FullName)"
+            echo "exe_path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "No EXE found — listing build output:"
+            Get-ChildItem -Recurse build | Select-Object FullName
+            echo "exe_path=" >> $env:GITHUB_OUTPUT
+          }
 
       - name: Upload Windows EXE artifact
+        if: steps.find_exe.outputs.exe_path != ''
         uses: actions/upload-artifact@v4
         with:
           name: DJProto-Windows-x64
-          path: |
-            ${{ steps.find_exe.outputs.exe_path }}
+          path: ${{ steps.find_exe.outputs.exe_path }}
           retention-days: 30
           if-no-files-found: warn
 
-      - name: Upload build directory (for debugging failed builds)
+      - name: Upload build logs (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
-          path: build/**/*.log
+          path: |
+            build/**/*.log
+            build/CMakeFiles/CMakeError.log
+            build/CMakeFiles/CMakeOutput.log
           retention-days: 7

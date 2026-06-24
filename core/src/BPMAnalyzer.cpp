@@ -1,9 +1,16 @@
+#ifdef _WIN32
+#  define _USE_MATH_DEFINES   // must precede <cmath> on MSVC
+#endif
 #include "djcore/BPMAnalyzer.h"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <vector>
 #include <complex>
+
+#ifndef M_PI
+#  define M_PI 3.14159265358979323846
+#endif
 
 namespace djcore {
 

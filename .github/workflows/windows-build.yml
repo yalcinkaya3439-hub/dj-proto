@@ -9,16 +9,26 @@ on:
 jobs:
   build-windows:
     name: Build Windows EXE (JUCE + Core)
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # windows-latest already ships VS 2022; no extra setup action needed.
-      # Using the VS 2022 generator directly is the most reliable approach.
-      - name: Configure (Visual Studio 17 2022 x64)
+      - name: Find VS 2022 with vswhere
+        id: vs
         shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath  = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          echo "VS install path: $vsPath"
+          echo "vs_path=$vsPath" >> $env:GITHUB_OUTPUT
+          cmake --version
+
+      - name: Configure (VS 2022 x64)
+        shell: pwsh
+        env:
+          CMAKE_GENERATOR_INSTANCE: ${{ steps.vs.outputs.vs_path }}
         run: |
           cmake -S . -B build `
             -G "Visual Studio 17 2022" `

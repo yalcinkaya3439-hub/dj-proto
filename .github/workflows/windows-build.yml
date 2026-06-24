@@ -15,31 +15,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up MSVC developer environment (VS 2022 x64)
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-          vsversion: "2022"
-
-      - name: Configure (Ninja + MSVC)
-        shell: cmd
+      # windows-latest already ships VS 2022; no extra setup action needed.
+      # Using the VS 2022 generator directly is the most reliable approach.
+      - name: Configure (Visual Studio 17 2022 x64)
+        shell: pwsh
         run: |
-          cmake -S . -B build ^
-            -G Ninja ^
-            -DCMAKE_BUILD_TYPE=Release ^
-            -DCMAKE_C_COMPILER=cl ^
-            -DCMAKE_CXX_COMPILER=cl ^
-            -DDJCORE_BUILD_TESTS=ON ^
+          cmake -S . -B build `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DDJCORE_BUILD_TESTS=ON `
             -DDJAPP_BUILD=ON
 
       - name: Build
-        shell: cmd
-        run: cmake --build build --parallel
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
 
       - name: Run Core Tests on Windows
-        shell: cmd
+        shell: pwsh
         working-directory: build
-        run: ctest --output-on-failure --parallel 4
+        run: ctest -C Release --output-on-failure --parallel 4
 
       - name: Locate EXE
         id: find_exe
@@ -72,7 +67,6 @@ jobs:
         with:
           name: build-logs
           path: |
-            build/**/*.log
             build/CMakeFiles/CMakeError.log
             build/CMakeFiles/CMakeOutput.log
           retention-days: 7

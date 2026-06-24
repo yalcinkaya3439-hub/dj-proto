@@ -41,6 +41,4 @@ target_link_libraries(DJProtoApp
         juce::juce_recommended_warning_flags
 )
 
-juce_add_binary_data(AppBinaryData SOURCES
-    # Add any resource files here (icons, etc.)
-)
+# juce_add_binary_data requires at least one file; omit it until real assets are added.

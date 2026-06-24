@@ -292,7 +292,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     auto fillDeck = [&](AudioDeck& deck) {
         tmp.clear();
         juce::AudioSourceChannelInfo info(&tmp, 0, numSamples);
-        deck.audioSource()->getNextAudioBlock(info);
+        deck.getNextAudioBlock(info);
         for (int ch = 0; ch < numOutputChannels; ++ch)
             outBuf.addFrom(ch, 0, tmp, ch, 0, numSamples);
     };

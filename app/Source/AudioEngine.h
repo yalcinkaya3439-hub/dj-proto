@@ -11,52 +11,49 @@
 #include <string>
 
 // ---- PlaybackState ---------------------------------------------------------
-// All fields accessed from audio thread must be atomic or lock-free.
 struct PlaybackState {
-    std::atomic<double>  playheadSample{0.0};   // current sample position
-    std::atomic<double>  tempoRatio{1.0};        // pitch-preserving speed multiplier
-    std::atomic<bool>    playing{false};
-    std::atomic<bool>    looping{false};
-    std::atomic<double>  loopStart{0.0};
-    std::atomic<double>  loopEnd{0.0};
-    std::atomic<bool>    cueArmed{false};        // next press jumps to cue
-    std::atomic<double>  cuePoint{0.0};
+    std::atomic<double> playheadSample{0.0};
+    std::atomic<double> tempoRatio{1.0};
+    std::atomic<bool>   playing{false};
+    std::atomic<bool>   looping{false};
+    std::atomic<double> loopStart{0.0};
+    std::atomic<double> loopEnd{0.0};
+    std::atomic<bool>   cueArmed{false};
+    std::atomic<double> cuePoint{0.0};
 };
 
 // ---- AudioDeck -------------------------------------------------------------
-// One deck: owns its decoded audio buffer, waveform peaks, beatgrid, and
-// the JUCE audio source that writes samples to the output.
-class AudioDeck : private juce::AudioSource {
+// Owns audio buffer, waveform peaks, beatgrid.
+// Implements juce::AudioSource publicly so AudioEngine can mix via source API.
+class AudioDeck : public juce::AudioSource {
 public:
     AudioDeck();
     ~AudioDeck() override;
 
     // Load a file (runs BPM analysis in a background thread)
-    // onLoaded is called on the message thread when analysis is complete.
     void loadFile(const juce::File& file,
                   djcore::TrackDataStore& store,
                   std::function<void()> onLoaded);
 
-    // Unload current file
     void unload();
 
-    bool isLoaded() const  { return loaded_; }
+    bool isLoaded()  const { return loaded_; }
     bool isPlaying() const { return state_.playing.load(); }
 
     // Transport
     void play();
     void pause();
-    void stop();           // pause + return to cue
+    void stop();
     void seekToSample(double sample);
-    void setCuePoint(double sample);   // set cue
+    void setCuePoint(double sample);
     void jumpToCue();
     void toggleLoop(int measures);
     void disableLoop();
 
     // Tempo
-    void setTempoRatio(double ratio);  // 1.0 = original speed
+    void setTempoRatio(double ratio);
 
-    // BPM / grid mutators
+    // BPM / grid
     void setBPM(double bpm);
     void setTimeSignature(const djcore::TimeSignature& ts);
     void setBPMHalf();
@@ -66,46 +63,38 @@ public:
     void shiftGrid(double deltaSamples);
 
     // Getters
-    double           currentSamplePosition()   const;
-    double           bpm()                     const;
-    double           totalSamples()            const;
-    int              sampleRate()              const;
-    const djcore::WaveformPeaks& waveformPeaks() const { return peaks_; }
-    const djcore::BeatGrid&      beatGrid()      const { return grid_; }
-    const djcore::TrackAnalysis& trackAnalysis() const { return analysis_; }
-    const PlaybackState&         playbackState() const { return state_; }
+    double                       currentSamplePosition() const;
+    double                       bpm()                   const;
+    double                       totalSamples()          const;
+    int                          sampleRate()            const;
+    const djcore::WaveformPeaks& waveformPeaks()        const { return peaks_; }
+    const djcore::BeatGrid&      beatGrid()              const { return grid_; }
+    const djcore::TrackAnalysis& trackAnalysis()         const { return analysis_; }
+    const PlaybackState&         playbackState()         const { return state_; }
 
-    // JUCE audio source — called by the device manager
-    juce::AudioSource* audioSource() { return this; }
-
-private:
-    // juce::AudioSource interface
+    // juce::AudioSource interface (public — AudioEngine adds this to mixer)
     void prepareToPlay(int samplesPerBlockExpected, double newSampleRate) override;
     void releaseResources() override;
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& info) override;
 
+private:
     void doAnalysis(djcore::TrackDataStore& store, std::function<void()> onLoaded);
 
-    // Audio data
-    juce::AudioBuffer<float>   buffer_;
-    bool                       loaded_        = false;
-    int                        fileSampleRate_ = 44100;
-    int                        outputSampleRate_ = 44100;
+    juce::AudioBuffer<float>      buffer_;
+    bool                          loaded_           = false;
+    int                           fileSampleRate_   = 44100;
+    int                           outputSampleRate_ = 44100;
 
-    // State
-    PlaybackState              state_;
+    PlaybackState                 state_;
+    djcore::WaveformPeaks         peaks_;
+    djcore::BeatGrid              grid_;
+    djcore::TrackAnalysis         analysis_;
 
-    // Analysis results
-    djcore::WaveformPeaks      peaks_;
-    djcore::BeatGrid           grid_;
-    djcore::TrackAnalysis      analysis_;
-
-    juce::CriticalSection      lock_;
+    juce::CriticalSection         lock_;
     std::unique_ptr<juce::Thread> analysisThread_;
 };
 
 // ---- AudioEngine -----------------------------------------------------------
-// Owns both decks and the JUCE device manager.
 class AudioEngine : public juce::AudioIODeviceCallback {
 public:
     AudioEngine();
@@ -117,7 +106,6 @@ public:
     AudioDeck& deckA() { return *deckA_; }
     AudioDeck& deckB() { return *deckB_; }
 
-    // Sync
     void applyTempoSync(AudioDeck& master, AudioDeck& follower);
     void applyBeatSync (AudioDeck& master, AudioDeck& follower);
     void applyBarSync  (AudioDeck& master, AudioDeck& follower);
@@ -125,7 +113,6 @@ public:
     juce::AudioDeviceManager& deviceManager() { return deviceManager_; }
 
 private:
-    // juce::AudioIODeviceCallback
     void audioDeviceIOCallbackWithContext(
         const float* const* inputChannelData, int numInputChannels,
         float* const* outputChannelData,      int numOutputChannels,
@@ -134,9 +121,7 @@ private:
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override;
     void audioDeviceStopped() override;
 
-    juce::AudioDeviceManager deviceManager_;
-    juce::AudioMixer         mixer_;
-
+    juce::AudioDeviceManager   deviceManager_;
     std::unique_ptr<AudioDeck> deckA_;
     std::unique_ptr<AudioDeck> deckB_;
 };

@@ -1,0 +1,49 @@
+name: Linux Core Tests
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'core/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/linux-tests.yml'
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Build & Run Core Tests (Ubuntu)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++-12
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100
+
+      - name: Configure (tests only, no JUCE app)
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DDJCORE_BUILD_TESTS=ON \
+            -DDJAPP_BUILD=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run tests
+        working-directory: build
+        run: ctest --output-on-failure --parallel 4
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-test-results
+          path: build/Testing/

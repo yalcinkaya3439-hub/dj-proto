@@ -1,0 +1,66 @@
+name: Windows Build
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-windows:
+    name: Build Windows EXE (JUCE + Core)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC (VS 2022)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install CMake & Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Configure
+        run: |
+          cmake -S . -B build `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DDJCORE_BUILD_TESTS=ON `
+            -DDJAPP_BUILD=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run Core Tests on Windows
+        working-directory: build
+        run: ctest -C Release --output-on-failure --parallel 4
+
+      - name: Locate EXE
+        id: find_exe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse build\app\Release\*.exe | Select-Object -First 1
+          if (-not $exe) { $exe = Get-ChildItem -Recurse build\*.exe | Select-Object -First 1 }
+          echo "EXE path: $($exe.FullName)"
+          echo "exe_path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Windows EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DJProto-Windows-x64
+          path: |
+            ${{ steps.find_exe.outputs.exe_path }}
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload build directory (for debugging failed builds)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: build/**/*.log
+          retention-days: 7

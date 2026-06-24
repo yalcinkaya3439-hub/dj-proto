@@ -1,0 +1,51 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "linux-tests",
+      "displayName": "Linux – Core Tests Only",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DJCORE_BUILD_TESTS": "ON",
+        "DJAPP_BUILD": "OFF"
+      }
+    },
+    {
+      "name": "windows-full",
+      "displayName": "Windows – Full Build (JUCE + Tests)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build-win",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DJCORE_BUILD_TESTS": "ON",
+        "DJAPP_BUILD": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Linux – Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DJCORE_BUILD_TESTS": "ON",
+        "DJAPP_BUILD": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "linux-tests", "configurePreset": "linux-tests" },
+    { "name": "debug",       "configurePreset": "debug" }
+  ],
+  "testPresets": [
+    {
+      "name": "linux-tests",
+      "configurePreset": "linux-tests",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 4 }
+    }
+  ]
+}

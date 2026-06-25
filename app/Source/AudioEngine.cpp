@@ -1,19 +1,26 @@
 #include "AudioEngine.h"
 #include <JuceHeader.h>
+#ifndef _USE_MATH_DEFINES
+#define _USE_MATH_DEFINES
+#endif
 #include <cmath>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 // ============================================================================
 // AudioDeck
 // ============================================================================
 
 AudioDeck::AudioDeck() = default;
+
 AudioDeck::~AudioDeck() {
     if (analysisThread_) analysisThread_->stopThread(5000);
 }
 
 void AudioDeck::loadFile(const juce::File& file,
                          djcore::TrackDataStore& store,
-                         std::function<void()> onLoaded)
+                         std::function<void(LoadResult)> onLoaded)
 {
     if (analysisThread_) analysisThread_->stopThread(3000);
 
@@ -22,20 +29,24 @@ void AudioDeck::loadFile(const juce::File& file,
     state_.looping.store(false);
     loaded_ = false;
 
-    // Decode audio on a background thread
+    // --- KEY FIX: store the file path BEFORE the background thread starts ---
+    analysis_.filePath = file.getFullPathName().toStdString();
+
     struct AnalysisJob : public juce::Thread {
-        AudioDeck* deck;
-        juce::File file;
-        djcore::TrackDataStore* store;
-        std::function<void()> onLoaded;
+        AudioDeck*                       deck;
+        juce::File                       file;
+        djcore::TrackDataStore*          store;
+        std::function<void(LoadResult)>  onLoaded;
 
         AnalysisJob(AudioDeck* d, juce::File f,
-                    djcore::TrackDataStore* s, std::function<void()> cb)
-            : Thread("AudioDeck_Analysis"), deck(d), file(std::move(f)),
+                    djcore::TrackDataStore* s,
+                    std::function<void(LoadResult)> cb)
+            : Thread("AudioDeck_Analysis"),
+              deck(d), file(std::move(f)),
               store(s), onLoaded(std::move(cb)) {}
 
         void run() override {
-            deck->doAnalysis(*store, onLoaded);
+            deck->doAnalysis(file, *store, onLoaded);
         }
     };
 
@@ -43,24 +54,53 @@ void AudioDeck::loadFile(const juce::File& file,
     analysisThread_->startThread();
 }
 
-void AudioDeck::doAnalysis(djcore::TrackDataStore& store,
-                            std::function<void()> onLoaded)
+void AudioDeck::doAnalysis(const juce::File& file,
+                            djcore::TrackDataStore& store,
+                            std::function<void(LoadResult)> onLoaded)
 {
-    // Check data store first
-    auto cached = store.load(analysis_.filePath);
-    bool needAnalysis = !cached.has_value();
+    // Helper to fire callback on the message thread
+    auto fireCallback = [&](LoadResult res) {
+        juce::MessageManager::callAsync([onLoaded, res] { onLoaded(res); });
+    };
 
-    // Decode audio file
+    // --- 1. Validate file exists and is readable ---
+    if (!file.existsAsFile()) {
+        LoadResult r;
+        r.ok    = false;
+        r.error = "File not found: " + file.getFullPathName();
+        fireCallback(r);
+        return;
+    }
+
+    // --- 2. Build format manager (WAV first, then all basics) ---
     juce::AudioFormatManager fmtMgr;
-    fmtMgr.registerBasicFormats();
+    fmtMgr.registerBasicFormats();   // WAV, AIFF, FLAC, MP3 (if available)
 
     auto reader = std::unique_ptr<juce::AudioFormatReader>(
-        fmtMgr.createReaderFor(juce::File(analysis_.filePath)));
-    if (!reader) return;
+        fmtMgr.createReaderFor(file));
 
-    fileSampleRate_ = static_cast<int>(reader->sampleRate);
-    int numChannels = static_cast<int>(reader->numChannels);
-    auto numSamples = static_cast<juce::int64>(reader->lengthInSamples);
+    if (!reader) {
+        LoadResult r;
+        r.ok       = false;
+        r.fileName = file.getFileName();
+        r.error    = "Unsupported format or corrupt file: " + file.getFileName()
+                   + "\nSupported: WAV, AIFF, FLAC";
+        fireCallback(r);
+        return;
+    }
+
+    // --- 3. Decode audio into buffer ---
+    fileSampleRate_    = static_cast<int>(reader->sampleRate);
+    int    numChannels = static_cast<int>(reader->numChannels);
+    auto   numSamples  = static_cast<juce::int64>(reader->lengthInSamples);
+
+    if (numSamples <= 0 || numChannels <= 0 || fileSampleRate_ <= 0) {
+        LoadResult r;
+        r.ok    = false;
+        r.error = "Invalid audio data in file: " + file.getFileName();
+        fireCallback(r);
+        return;
+    }
 
     {
         juce::ScopedLock sl(lock_);
@@ -68,48 +108,58 @@ void AudioDeck::doAnalysis(djcore::TrackDataStore& store,
         reader->read(&buffer_, 0, static_cast<int>(numSamples), 0, true, true);
     }
 
-    // Convert to interleaved float for core library
-    std::vector<float> interleaved(numChannels * static_cast<size_t>(numSamples));
+    // --- 4. Build interleaved float vector for core library ---
+    std::vector<float> interleaved(
+        static_cast<size_t>(numChannels) * static_cast<size_t>(numSamples));
     for (juce::int64 s = 0; s < numSamples; ++s)
         for (int c = 0; c < numChannels; ++c)
             interleaved[static_cast<size_t>(s * numChannels + c)] =
                 buffer_.getSample(c, static_cast<int>(s));
 
-    // Compute waveform peaks
+    // --- 5. Compute waveform peaks ---
     peaks_ = djcore::WaveformAnalyzer::computePeaks(
         interleaved, numChannels, fileSampleRate_, 256);
 
-    if (needAnalysis) {
-        // BPM analysis
+    // --- 6. BPM analysis (use cache if available) ---
+    auto cached = store.load(analysis_.filePath);
+    if (cached.has_value()) {
+        analysis_ = *cached;
+    } else {
         auto bpmResult = djcore::BPMAnalyzer::analyze(
             interleaved, numChannels, fileSampleRate_);
 
-        analysis_.detectedBPM    = bpmResult.bpm;
-        analysis_.correctedBPM   = 0.0;
-        analysis_.confidence     = bpmResult.confidence;
+        analysis_.detectedBPM     = bpmResult.bpm;
+        analysis_.correctedBPM    = 0.0;
+        analysis_.confidence      = bpmResult.confidence;
         analysis_.confidenceScore = bpmResult.confidenceScore;
         analysis_.firstBeatSample = bpmResult.firstBeatSample;
-        analysis_.sampleRate     = fileSampleRate_;
-        analysis_.totalSamples   = numSamples;
-        analysis_.channels       = numChannels;
-        analysis_.timeSig        = djcore::TimeSignature::make44();
-
-        analysis_.fileHash = djcore::TrackDataStore::computeFileHash(analysis_.filePath);
-        analysis_.modTime  = djcore::TrackDataStore::currentTimestamp();
+        analysis_.sampleRate      = fileSampleRate_;
+        analysis_.totalSamples    = numSamples;
+        analysis_.channels        = numChannels;
+        analysis_.timeSig         = djcore::TimeSignature::make44();
+        analysis_.filePath        = file.getFullPathName().toStdString();
+        analysis_.fileHash        = djcore::TrackDataStore::computeFileHash(analysis_.filePath);
+        analysis_.modTime         = djcore::TrackDataStore::currentTimestamp();
         store.save(analysis_);
-    } else {
-        analysis_ = *cached;
     }
 
-    // Build beat grid
+    // --- 7. Build beat grid ---
     double bpm = analysis_.effectiveBPM();
     grid_ = djcore::BeatGrid(bpm, analysis_.firstBeatSample,
                              analysis_.timeSig, fileSampleRate_);
     grid_.recompute(numSamples);
 
+    // --- 8. Mark loaded ---
     loaded_ = true;
 
-    juce::MessageManager::callAsync([onLoaded] { onLoaded(); });
+    // --- 9. Fire success callback on message thread ---
+    LoadResult res;
+    res.ok          = true;
+    res.fileName    = file.getFileName();
+    res.bpm         = bpm;
+    res.sampleRate  = fileSampleRate_;
+    res.durationSec = static_cast<double>(numSamples) / fileSampleRate_;
+    fireCallback(res);
 }
 
 void AudioDeck::unload() {
@@ -125,8 +175,8 @@ void AudioDeck::pause() { state_.playing.store(false); }
 void AudioDeck::stop()  { state_.playing.store(false); jumpToCue(); }
 
 void AudioDeck::seekToSample(double sample) {
-    double clamped = std::max(0.0, std::min(sample,
-        static_cast<double>(buffer_.getNumSamples() - 1)));
+    double clamped = std::max(0.0,
+        std::min(sample, static_cast<double>(buffer_.getNumSamples() - 1)));
     state_.playheadSample.store(clamped);
 }
 
@@ -134,10 +184,7 @@ void AudioDeck::setCuePoint(double sample) { state_.cuePoint.store(sample); }
 void AudioDeck::jumpToCue() { seekToSample(state_.cuePoint.load()); }
 
 void AudioDeck::toggleLoop(int measures) {
-    if (state_.looping.load()) {
-        disableLoop();
-        return;
-    }
+    if (state_.looping.load()) { disableLoop(); return; }
     double pos = state_.playheadSample.load();
     auto region = djcore::LoopEngine::calculateMeasureLoop(
         pos, measures, grid_,
@@ -168,13 +215,11 @@ void AudioDeck::setTimeSignature(const djcore::TimeSignature& ts) {
     grid_.recompute(buffer_.getNumSamples());
 }
 
-void AudioDeck::setBPMHalf()   { setBPM(analysis_.effectiveBPM() / 2.0); }
-void AudioDeck::setBPMDouble() { setBPM(analysis_.effectiveBPM() * 2.0); }
-void AudioDeck::adjustBPM(double delta) { setBPM(analysis_.effectiveBPM() + delta); }
+void AudioDeck::setBPMHalf()              { setBPM(analysis_.effectiveBPM() / 2.0); }
+void AudioDeck::setBPMDouble()            { setBPM(analysis_.effectiveBPM() * 2.0); }
+void AudioDeck::adjustBPM(double delta)   { setBPM(analysis_.effectiveBPM() + delta); }
 
 void AudioDeck::rerunBPMAnalysis() {
-    // Trigger a new analysis without clearing loaded audio
-    // Simplified: just reset correctedBPM so next load re-analyses
     analysis_.correctedBPM = 0.0;
 }
 
@@ -188,7 +233,8 @@ double AudioDeck::bpm()                   const { return analysis_.effectiveBPM(
 double AudioDeck::totalSamples()          const { return static_cast<double>(buffer_.getNumSamples()); }
 int    AudioDeck::sampleRate()            const { return outputSampleRate_; }
 
-// ---- JUCE AudioSource callbacks --------------------------------------------
+// ---- juce::AudioSource callbacks -------------------------------------------
+
 void AudioDeck::prepareToPlay(int /*samplesPerBlockExpected*/, double newSampleRate) {
     outputSampleRate_ = static_cast<int>(newSampleRate);
 }
@@ -201,13 +247,11 @@ void AudioDeck::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) {
 
     juce::ScopedLock sl(lock_);
 
-    int numChannels = buffer_.getNumChannels();
-    int totalBufSamples = buffer_.getNumSamples();
-    double pos = state_.playheadSample.load();
-    double ratio = state_.tempoRatio.load();
+    int    numChannels      = buffer_.getNumChannels();
+    int    totalBufSamples  = buffer_.getNumSamples();
+    double pos              = state_.playheadSample.load();
+    double ratio            = state_.tempoRatio.load();
 
-    // Simple non-interpolated playback with tempo ratio
-    // For a production implementation, use a resampling algorithm (e.g. JUCE ResamplingAudioSource)
     for (int i = 0; i < info.numSamples; ++i) {
         int srcSample = static_cast<int>(pos);
 
@@ -225,7 +269,7 @@ void AudioDeck::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) {
         }
 
         for (int c = 0; c < info.buffer->getNumChannels(); ++c) {
-            int srcCh = c % numChannels;
+            int   srcCh  = c % numChannels;
             float sample = buffer_.getSample(srcCh, srcSample);
             info.buffer->addSample(c, info.startSample + i, sample);
         }
@@ -250,7 +294,6 @@ AudioEngine::~AudioEngine() { shutdown(); }
 void AudioEngine::initialise() {
     auto result = deviceManager_.initialiseWithDefaultDevices(0, 2);
     if (result.isNotEmpty()) {
-        // Try fallback: software output
         juce::AudioDeviceManager::AudioDeviceSetup setup;
         deviceManager_.getAudioDeviceSetup(setup);
         setup.outputDeviceName = "";
@@ -266,8 +309,8 @@ void AudioEngine::shutdown() {
 }
 
 void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device) {
-    double sr = device->getCurrentSampleRate();
-    int block = device->getCurrentBufferSizeSamples();
+    double sr    = device->getCurrentSampleRate();
+    int    block = device->getCurrentBufferSizeSamples();
     deckA_->prepareToPlay(block, sr);
     deckB_->prepareToPlay(block, sr);
 }
@@ -286,7 +329,6 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     juce::AudioBuffer<float> outBuf(outputChannelData, numOutputChannels, numSamples);
     outBuf.clear();
 
-    // Mix both decks into the output
     juce::AudioBuffer<float> tmp(numOutputChannels, numSamples);
 
     auto fillDeck = [&](AudioDeck& deck) {
@@ -300,7 +342,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     fillDeck(*deckA_);
     fillDeck(*deckB_);
 
-    // Simple soft clip
+    // Soft clip
     for (int ch = 0; ch < numOutputChannels; ++ch) {
         auto* data = outBuf.getWritePointer(ch);
         for (int i = 0; i < numSamples; ++i)
@@ -309,32 +351,30 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
 }
 
 // ---- Sync helpers ----------------------------------------------------------
+
 void AudioEngine::applyTempoSync(AudioDeck& master, AudioDeck& follower) {
-    // Only adjusts playback speed — does NOT move playhead
     double masterBPM   = master.bpm();
     double followerBPM = follower.bpm();
     if (followerBPM <= 0.0 || masterBPM <= 0.0) return;
-    double ratio = masterBPM / followerBPM;
-    follower.setTempoRatio(ratio);
+    follower.setTempoRatio(masterBPM / followerBPM);
 }
 
 void AudioEngine::applyBeatSync(AudioDeck& master, AudioDeck& follower) {
     applyTempoSync(master, follower);
-    // Phase alignment: find nearest sub-beat in follower that aligns with master
+
     const djcore::BeatGrid& mGrid = master.beatGrid();
     const djcore::BeatGrid& fGrid = follower.beatGrid();
-    double mPos = master.currentSamplePosition();
-    double fPos = follower.currentSamplePosition();
-
-    // Find master's phase within a beat
+    double mPos   = master.currentSamplePosition();
+    double fPos   = follower.currentSamplePosition();
     double mSbDur = mGrid.subBeatDurationSamples();
     if (mSbDur <= 0.0) return;
+
     double mPhase = std::fmod(mPos - mGrid.getFirstBeat(), mSbDur);
     if (mPhase < 0.0) mPhase += mSbDur;
 
-    // Adjust follower playhead so its phase matches
     double fSbDur = fGrid.subBeatDurationSamples();
     if (fSbDur <= 0.0) return;
+
     double fPhaseOffset = std::fmod(fPos - fGrid.getFirstBeat(), fSbDur);
     if (fPhaseOffset < 0.0) fPhaseOffset += fSbDur;
 
@@ -343,20 +383,17 @@ void AudioEngine::applyBeatSync(AudioDeck& master, AudioDeck& follower) {
 }
 
 void AudioEngine::applyBarSync(AudioDeck& master, AudioDeck& follower) {
-    // Bar sync only valid when time signatures match
     const djcore::TimeSignature& mTS = master.beatGrid().getTimeSig();
     const djcore::TimeSignature& fTS = follower.beatGrid().getTimeSig();
     if (mTS.numerator != fTS.numerator || mTS.denominator != fTS.denominator) {
-        // Safety: fall back to tempo-only sync
         applyTempoSync(master, follower);
         return;
     }
     applyTempoSync(master, follower);
 
-    // Align measure starts
-    const djcore::BeatGrid& mGrid = master.beatGrid();
-    const djcore::BeatGrid& fGrid = follower.beatGrid();
-    double mPos = master.currentSamplePosition();
+    const djcore::BeatGrid& mGrid  = master.beatGrid();
+    const djcore::BeatGrid& fGrid  = follower.beatGrid();
+    double mPos     = master.currentSamplePosition();
     double mMeasDur = mGrid.measureDurationSamples();
     double fMeasDur = fGrid.measureDurationSamples();
     if (mMeasDur <= 0.0 || fMeasDur <= 0.0) return;
@@ -364,12 +401,10 @@ void AudioEngine::applyBarSync(AudioDeck& master, AudioDeck& follower) {
     double mPhase = std::fmod(mPos - mGrid.getFirstBeat(), mMeasDur);
     if (mPhase < 0.0) mPhase += mMeasDur;
 
-    double fPos = follower.currentSamplePosition();
-    double fFirstBeat = fGrid.getFirstBeat();
-    double fPhase = std::fmod(fPos - fFirstBeat, fMeasDur);
+    double fPos      = follower.currentSamplePosition();
+    double fPhase    = std::fmod(fPos - fGrid.getFirstBeat(), fMeasDur);
     if (fPhase < 0.0) fPhase += fMeasDur;
 
-    // Move follower playhead so its measure phase matches master
     double correction = (mPhase * (fMeasDur / mMeasDur)) - fPhase;
     follower.seekToSample(fPos + correction);
 }

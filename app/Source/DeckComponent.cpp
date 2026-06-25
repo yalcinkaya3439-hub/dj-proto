@@ -9,7 +9,8 @@ static juce::String formatTime(double samples, int sampleRate) {
     int m = static_cast<int>(secs) / 60;
     double s = secs - m * 60;
     std::ostringstream oss;
-    oss << m << ":" << std::setw(4) << std::setfill('0') << std::fixed << std::setprecision(1) << s;
+    oss << m << ":" << std::setw(4) << std::setfill('0')
+        << std::fixed << std::setprecision(1) << s;
     return juce::String(oss.str());
 }
 
@@ -22,6 +23,12 @@ DeckComponent::DeckComponent(AudioDeck& deck, const juce::String& label)
     deckLabel_.setFont(juce::Font(20.0f, juce::Font::bold));
     deckLabel_.setColour(juce::Label::textColourId, juce::Colours::white);
     addAndMakeVisible(deckLabel_);
+
+    // Status label — spans full width, shows load progress / errors
+    statusLabel_.setText("No file loaded", juce::dontSendNotification);
+    statusLabel_.setColour(juce::Label::textColourId, juce::Colours::grey);
+    statusLabel_.setFont(juce::Font(13.0f));
+    addAndMakeVisible(statusLabel_);
 
     for (auto* btn : {&loadButton_, &playButton_, &pauseButton_, &cueButton_, &setCueButton_,
                       &bpmHalfBtn_, &bpmDblBtn_, &bpmDecBtn_, &bpmIncBtn_,
@@ -107,6 +114,11 @@ DeckComponent::~DeckComponent() {
     timer_.stopTimer();
 }
 
+void DeckComponent::setStatus(const juce::String& msg, juce::Colour colour) {
+    statusLabel_.setText(msg, juce::dontSendNotification);
+    statusLabel_.setColour(juce::Label::textColourId, colour);
+}
+
 void DeckComponent::buildTimeSigOptions() {
     timeSigCombo_.clear();
     timeSigCombo_.addItem("4/4",  1);
@@ -124,7 +136,6 @@ void DeckComponent::buildTimeSigOptions() {
 
 void DeckComponent::buildGroupingOptions() {
     groupingCombo_.clear();
-    // These are populated based on the selected time signature
     groupingCombo_.addItem("Default", 1);
     groupingCombo_.addItem("Custom…", 99);
     groupingCombo_.setSelectedId(1, juce::dontSendNotification);
@@ -134,20 +145,19 @@ void DeckComponent::applyTimeSig() {
     int tsId = timeSigCombo_.getSelectedId();
     djcore::TimeSignature ts;
     switch (tsId) {
-        case 1:  ts = djcore::TimeSignature::make44(); break;
-        case 2:  ts = djcore::TimeSignature::make34(); break;
-        case 3:  ts = djcore::TimeSignature::make24(); break;
-        case 4:  ts = djcore::TimeSignature::make58(); break;
-        case 5:  ts = djcore::TimeSignature::make68(); break;
-        case 6:  ts = djcore::TimeSignature::make78(); break;
-        case 7:  ts = djcore::TimeSignature::make88(); break;
-        case 8:  ts = djcore::TimeSignature::make98(); break;
+        case 1:  ts = djcore::TimeSignature::make44();  break;
+        case 2:  ts = djcore::TimeSignature::make34();  break;
+        case 3:  ts = djcore::TimeSignature::make24();  break;
+        case 4:  ts = djcore::TimeSignature::make58();  break;
+        case 5:  ts = djcore::TimeSignature::make68();  break;
+        case 6:  ts = djcore::TimeSignature::make78();  break;
+        case 7:  ts = djcore::TimeSignature::make88();  break;
+        case 8:  ts = djcore::TimeSignature::make98();  break;
         case 9:  ts = djcore::TimeSignature::make108(); break;
         case 10: ts = djcore::TimeSignature::make128(); break;
-        default: ts = djcore::TimeSignature::make44(); break;
+        default: ts = djcore::TimeSignature::make44();  break;
     }
 
-    // Apply custom grouping if selected
     int grpId = groupingCombo_.getSelectedId();
     if (grpId == 99) {
         juce::String grpStr = customGroupingEditor_.getText();
@@ -172,15 +182,14 @@ void DeckComponent::applyTimeSig() {
             }
         }
     } else {
-        // Populate preset groupings based on time sig
-        if (tsId == 6) {  // 7/8
+        if (tsId == 6) {
             std::vector<std::vector<int>> presets = {{2,2,3},{2,3,2},{3,2,2}};
             if (grpId >= 2 && grpId <= 4)
-                ts.grouping = presets[grpId - 2];
-        } else if (tsId == 8) {  // 9/8
+                ts.grouping = presets[static_cast<size_t>(grpId - 2)];
+        } else if (tsId == 8) {
             std::vector<std::vector<int>> presets = {{2,2,2,3},{2,2,3,2},{2,3,2,2},{3,2,2,2}};
             if (grpId >= 2 && grpId <= 5)
-                ts.grouping = presets[grpId - 2];
+                ts.grouping = presets[static_cast<size_t>(grpId - 2)];
         }
     }
 
@@ -191,57 +200,96 @@ void DeckComponent::applyTimeSig() {
 }
 
 void DeckComponent::openFile() {
-    auto chooser = std::make_shared<juce::FileChooser>(
-        "Load Audio File", juce::File{},
-        "*.wav;*.mp3;*.flac;*.aiff;*.ogg");
+    // Keep chooser alive until the async callback completes
+    activeChooser_ = std::make_shared<juce::FileChooser>(
+        "Load Audio File (WAV)", juce::File{}, "*.wav;*.aiff;*.flac");
 
-    chooser->launchAsync(juce::FileBrowserComponent::openMode |
-                         juce::FileBrowserComponent::canSelectFiles,
-        [this, chooser](const juce::FileChooser& fc) {
+    setStatus("Opening file dialog...", juce::Colours::lightgrey);
+
+    activeChooser_->launchAsync(
+        juce::FileBrowserComponent::openMode |
+        juce::FileBrowserComponent::canSelectFiles,
+        [this](const juce::FileChooser& fc)
+        {
+            // Stage 1: file dialog result
             auto result = fc.getResult();
-            if (!result.exists()) return;
-            deck_.loadFile(result, store_, [this] {
-                juce::MessageManager::callAsync([this] {
-                    waveform_.setWaveformData(
-                        &deck_.waveformPeaks(),
-                        &deck_.beatGrid(),
-                        &deck_.playbackState().playheadSample,
-                        static_cast<int64_t>(deck_.totalSamples()));
-                    updateUIFromDeck();
-                });
+            if (!result.existsAsFile()) {
+                setStatus("No file loaded", juce::Colours::grey);
+                activeChooser_.reset();
+                return;
+            }
+
+            // Stage 2: file path confirmed
+            setStatus("File selected: " + result.getFileName(), juce::Colours::cyan);
+
+            // Stage 3: hand off to AudioDeck (background thread)
+            setStatus("Loading: " + result.getFileName() + " ...", juce::Colour(0xffffcc00));
+
+            deck_.loadFile(result, store_, [this](LoadResult res)
+            {
+                // Always called on the message thread (via callAsync in doAnalysis)
+                activeChooser_.reset();
+
+                if (!res.ok) {
+                    // Stage: error
+                    setStatus("Load error: " + res.error, juce::Colours::orangered);
+                    juce::AlertWindow::showMessageBoxAsync(
+                        juce::AlertWindow::WarningIcon,
+                        "File Load Error",
+                        res.error);
+                    return;
+                }
+
+                // Stage: success
+                setStatus(
+                    res.fileName
+                    + "  |  " + juce::String(res.bpm, 1) + " BPM"
+                    + "  |  " + juce::String(res.durationSec / 60.0, 0) + ":"
+                    + juce::String(std::fmod(res.durationSec, 60.0), 0).paddedLeft('0', 2)
+                    + "  |  " + juce::String(res.sampleRate / 1000) + " kHz",
+                    juce::Colours::lightgreen);
+
+                waveform_.setWaveformData(
+                    &deck_.waveformPeaks(),
+                    &deck_.beatGrid(),
+                    &deck_.playbackState().playheadSample,
+                    static_cast<int64_t>(deck_.totalSamples()));
+
+                updateUIFromDeck();
             });
         });
 }
 
 void DeckComponent::buttonClicked(juce::Button* btn) {
-    if (btn == &loadButton_)   { openFile(); return; }
-    if (btn == &playButton_)   { deck_.play();  return; }
-    if (btn == &pauseButton_)  { deck_.pause(); return; }
-    if (btn == &cueButton_)    { deck_.jumpToCue(); return; }
-    if (btn == &setCueButton_) { deck_.setCuePoint(deck_.currentSamplePosition()); return; }
-    if (btn == &bpmHalfBtn_)   { deck_.setBPMHalf();   updateUIFromDeck(); return; }
-    if (btn == &bpmDblBtn_)    { deck_.setBPMDouble(); updateUIFromDeck(); return; }
-    if (btn == &bpmDecBtn_)    { deck_.adjustBPM(-0.1); updateUIFromDeck(); return; }
-    if (btn == &bpmIncBtn_)    { deck_.adjustBPM(+0.1); updateUIFromDeck(); return; }
+    if (btn == &loadButton_)       { openFile(); return; }
+    if (btn == &playButton_)       { deck_.play();  return; }
+    if (btn == &pauseButton_)      { deck_.pause(); return; }
+    if (btn == &cueButton_)        { deck_.jumpToCue(); return; }
+    if (btn == &setCueButton_)     { deck_.setCuePoint(deck_.currentSamplePosition()); return; }
+    if (btn == &bpmHalfBtn_)       { deck_.setBPMHalf();    updateUIFromDeck(); return; }
+    if (btn == &bpmDblBtn_)        { deck_.setBPMDouble();  updateUIFromDeck(); return; }
+    if (btn == &bpmDecBtn_)        { deck_.adjustBPM(-0.1); updateUIFromDeck(); return; }
+    if (btn == &bpmIncBtn_)        { deck_.adjustBPM(+0.1); updateUIFromDeck(); return; }
     if (btn == &applyGroupingBtn_) { applyTimeSig(); return; }
-    if (btn == &loop1Btn_)  { deck_.toggleLoop(1); return; }
-    if (btn == &loop2Btn_)  { deck_.toggleLoop(2); return; }
-    if (btn == &loopOffBtn_){ deck_.disableLoop(); return; }
-    if (btn == &gridLeftBtn_)  { deck_.shiftGrid(-deck_.beatGrid().subBeatDurationSamples() * 0.1); return; }
-    if (btn == &gridRightBtn_) { deck_.shiftGrid(+deck_.beatGrid().subBeatDurationSamples() * 0.1); return; }
+    if (btn == &loop1Btn_)         { deck_.toggleLoop(1); return; }
+    if (btn == &loop2Btn_)         { deck_.toggleLoop(2); return; }
+    if (btn == &loopOffBtn_)       { deck_.disableLoop(); return; }
+    if (btn == &gridLeftBtn_)
+        { deck_.shiftGrid(-deck_.beatGrid().subBeatDurationSamples() * 0.1); return; }
+    if (btn == &gridRightBtn_)
+        { deck_.shiftGrid(+deck_.beatGrid().subBeatDurationSamples() * 0.1); return; }
 }
 
 void DeckComponent::comboBoxChanged(juce::ComboBox* cb) {
     if (cb == &timeSigCombo_) {
-        // Update grouping presets for the new time sig
         int tsId = timeSigCombo_.getSelectedId();
         groupingCombo_.clear(juce::dontSendNotification);
         groupingCombo_.addItem("Default", 1);
-        if (tsId == 6) {  // 7/8
+        if (tsId == 6) {
             groupingCombo_.addItem("2+2+3", 2);
             groupingCombo_.addItem("2+3+2", 3);
             groupingCombo_.addItem("3+2+2", 4);
-        } else if (tsId == 8) {  // 9/8
+        } else if (tsId == 8) {
             groupingCombo_.addItem("2+2+2+3", 2);
             groupingCombo_.addItem("2+2+3+2", 3);
             groupingCombo_.addItem("2+3+2+2", 4);
@@ -260,14 +308,14 @@ void DeckComponent::sliderValueChanged(juce::Slider* s) {
 void DeckComponent::updateUIFromDeck() {
     if (!deck_.isLoaded()) return;
 
-    double sr    = deck_.sampleRate();
-    double pos   = deck_.currentSamplePosition();
-    double total = deck_.totalSamples();
-    double remaining = total - pos;
+    double sr      = deck_.sampleRate();
+    double pos     = deck_.currentSamplePosition();
+    double total   = deck_.totalSamples();
+    double remain  = total - pos;
 
-    elapsedLabel_.setText("Elapsed: " + formatTime(pos, static_cast<int>(sr)),
+    elapsedLabel_.setText("Elapsed: " + formatTime(pos,    static_cast<int>(sr)),
                           juce::dontSendNotification);
-    remainingLabel_.setText("Remain: -" + formatTime(remaining, static_cast<int>(sr)),
+    remainingLabel_.setText("Remain: -" + formatTime(remain, static_cast<int>(sr)),
                             juce::dontSendNotification);
 
     double bpm = deck_.bpm();
@@ -278,16 +326,15 @@ void DeckComponent::updateUIFromDeck() {
     juce::Colour confColour;
     switch (conf) {
         case djcore::BPMConfidence::High:
-            confStr = "BPM Conf: High"; confColour = juce::Colours::lightgreen; break;
+            confStr = "BPM: High";   confColour = juce::Colours::lightgreen; break;
         case djcore::BPMConfidence::Medium:
-            confStr = "BPM Conf: Medium"; confColour = juce::Colours::yellow; break;
+            confStr = "BPM: Medium"; confColour = juce::Colours::yellow;     break;
         default:
-            confStr = "BPM Conf: Low"; confColour = juce::Colours::orangered; break;
+            confStr = "BPM: Low";   confColour = juce::Colours::orangered;  break;
     }
     confidenceLabel_.setText(confStr, juce::dontSendNotification);
     confidenceLabel_.setColour(juce::Label::textColourId, confColour);
 
-    // Loop markers
     waveform_.setLoopRegion(
         deck_.playbackState().loopStart.load(),
         deck_.playbackState().loopEnd.load(),
@@ -311,8 +358,12 @@ void DeckComponent::resized() {
     deckLabel_.setBounds(area.removeFromTop(rowH));
     area.removeFromTop(gap);
 
-    // Waveform — take 25% of height
+    // Waveform — 25 % of height
     waveform_.setBounds(area.removeFromTop(area.getHeight() / 4));
+    area.removeFromTop(gap);
+
+    // Status row (file name + BPM + duration)
+    statusLabel_.setBounds(area.removeFromTop(rowH));
     area.removeFromTop(gap);
 
     // Time display row

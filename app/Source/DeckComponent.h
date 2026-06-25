@@ -4,9 +4,6 @@
 #include "WaveformDisplay.h"
 #include "djcore/TimeSignature.h"
 
-// ---- DeckComponent ---------------------------------------------------------
-// Single DJ deck panel: waveform, transport controls, BPM display,
-// time signature / grouping selection, loop controls.
 class DeckComponent : public juce::Component,
                       private juce::Button::Listener,
                       private juce::ComboBox::Listener,
@@ -19,10 +16,8 @@ public:
     void paint(juce::Graphics& g) override;
     void resized() override;
 
-    // Called by MainComponent when sync state changes
     void refresh();
 
-    // Callbacks to MainComponent
     std::function<void()> onSyncRequest;
 
 private:
@@ -35,7 +30,7 @@ private:
     void buildTimeSigOptions();
     void buildGroupingOptions();
     void applyTimeSig();
-    void startRefreshTimer();
+    void setStatus(const juce::String& msg, juce::Colour colour = juce::Colours::lightgrey);
 
     AudioDeck& deck_;
     juce::String label_;
@@ -48,12 +43,15 @@ private:
     juce::TextButton     cueButton_    {"Cue"};
     juce::TextButton     setCueButton_ {"Set Cue"};
 
+    // Status / filename display
+    juce::Label          statusLabel_;
+
     // BPM section
     juce::Label          bpmLabel_;
     juce::TextEditor     bpmEditor_;
     juce::TextButton     bpmHalfBtn_   {"/2"};
     juce::TextButton     bpmDblBtn_    {"x2"};
-    juce::TextButton     bpmDecBtn_    {"−"};
+    juce::TextButton     bpmDecBtn_    {"..."};
     juce::TextButton     bpmIncBtn_    {"+"};
     juce::Label          confidenceLabel_;
 
@@ -71,8 +69,8 @@ private:
     juce::TextButton     loopOffBtn_   {"Loop Off"};
 
     // Grid nudge
-    juce::TextButton     gridLeftBtn_  {"◀"};
-    juce::TextButton     gridRightBtn_ {"▶"};
+    juce::TextButton     gridLeftBtn_  {"..."};
+    juce::TextButton     gridRightBtn_ {"..."};
     juce::Label          gridNudgeLabel_ {"", "Grid Nudge"};
 
     // Time display
@@ -87,6 +85,9 @@ private:
     juce::Label          tempoLabel_;
 
     djcore::TrackDataStore store_;
+
+    // FileChooser must stay alive until callback fires
+    std::shared_ptr<juce::FileChooser> activeChooser_;
 
     class RefreshTimer : public juce::Timer {
     public:

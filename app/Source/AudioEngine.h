@@ -22,18 +22,30 @@ struct PlaybackState {
     std::atomic<double> cuePoint{0.0};
 };
 
+// ---- LoadResult ------------------------------------------------------------
+// Passed to the onLoaded callback so callers know success/failure + details.
+struct LoadResult {
+    bool          ok       = false;
+    juce::String  error;      // empty on success
+    juce::String  fileName;   // display name
+    double        bpm        = 0.0;
+    double        durationSec = 0.0;
+    int           sampleRate  = 0;
+};
+
 // ---- AudioDeck -------------------------------------------------------------
 // Owns audio buffer, waveform peaks, beatgrid.
-// Implements juce::AudioSource publicly so AudioEngine can mix via source API.
+// Publicly inherits juce::AudioSource so AudioEngine can call prepareToPlay.
 class AudioDeck : public juce::AudioSource {
 public:
     AudioDeck();
     ~AudioDeck() override;
 
-    // Load a file (runs BPM analysis in a background thread)
+    // Load a WAV/MP3/FLAC file.  onLoaded is always called on the message
+    // thread, even on failure; check LoadResult::ok.
     void loadFile(const juce::File& file,
                   djcore::TrackDataStore& store,
-                  std::function<void()> onLoaded);
+                  std::function<void(LoadResult)> onLoaded);
 
     void unload();
 
@@ -72,13 +84,15 @@ public:
     const djcore::TrackAnalysis& trackAnalysis()         const { return analysis_; }
     const PlaybackState&         playbackState()         const { return state_; }
 
-    // juce::AudioSource interface (public — AudioEngine adds this to mixer)
+    // juce::AudioSource interface (public)
     void prepareToPlay(int samplesPerBlockExpected, double newSampleRate) override;
     void releaseResources() override;
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& info) override;
 
 private:
-    void doAnalysis(djcore::TrackDataStore& store, std::function<void()> onLoaded);
+    void doAnalysis(const juce::File& file,
+                    djcore::TrackDataStore& store,
+                    std::function<void(LoadResult)> onLoaded);
 
     juce::AudioBuffer<float>      buffer_;
     bool                          loaded_           = false;

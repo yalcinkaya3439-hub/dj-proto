@@ -219,6 +219,15 @@ void AudioDeck::setBPMHalf()              { setBPM(analysis_.effectiveBPM() / 2.
 void AudioDeck::setBPMDouble()            { setBPM(analysis_.effectiveBPM() * 2.0); }
 void AudioDeck::adjustBPM(double delta)   { setBPM(analysis_.effectiveBPM() + delta); }
 
+void AudioDeck::setManualLoop(double inSample, double outSample) {
+    state_.loopStart.store(inSample);
+    state_.loopEnd.store(outSample);
+}
+
+void AudioDeck::enableLoop() {
+    state_.looping.store(true);
+}
+
 void AudioDeck::rerunBPMAnalysis() {
     analysis_.correctedBPM = 0.0;
 }

@@ -2,83 +2,133 @@
 #include <JuceHeader.h>
 #include "djcore/WaveformAnalyzer.h"
 #include "djcore/BeatGrid.h"
+#include <atomic>
+
+// ---- OverviewWaveform ------------------------------------------------------
+// Thin full-track strip: shows complete waveform, position marker, loop region.
+// Click or drag → onSeek callback.
+class OverviewWaveform : public juce::Component, private juce::Timer {
+public:
+    OverviewWaveform();
+    ~OverviewWaveform() override;
+
+    void setWaveformData(const djcore::WaveformPeaks* peaks,
+                         const std::atomic<double>* playheadPtr,
+                         int64_t totalSamples);
+    void clear();
+
+    void setLoopRegion(double inSample, double outSample, bool active);
+    void setCuePoint(double sample);
+
+    std::function<void(double)> onSeek;
+
+    void paint(juce::Graphics&) override;
+    void resized() override;
+    void mouseDown(const juce::MouseEvent&) override;
+    void mouseDrag(const juce::MouseEvent&) override;
+
+private:
+    void timerCallback() override;
+    double xToSample(float x) const;
+    double sampleToX(double sample) const;
+    void rebuildCache();
+
+    const djcore::WaveformPeaks* peaks_       = nullptr;
+    const std::atomic<double>*   playheadPtr_ = nullptr;
+    int64_t                      totalSamples_ = 0;
+
+    double loopIn_     = 0.0;
+    double loopOut_    = 0.0;
+    bool   loopActive_ = false;
+    double cuePoint_   = 0.0;
+
+    // Cached peaks for overview width
+    juce::Image  cache_;
+    bool         cacheValid_     = false;
+    int          cachedW_        = 0;
+};
 
 // ---- WaveformDisplay -------------------------------------------------------
-// Custom JUCE component that draws:
-//   Layer 1: Real PCM peak waveform
-//   Layer 2: Sub-beat grid lines (thin)
-//   Layer 3: Group-start grid lines (medium)
-//   Layer 4: Measure-start grid lines (thick)
-//   Layer 5: Phrase-start grid lines (most prominent)
-//   Layer 6: Cue and loop markers
-//   Layer 7: Playhead (tied to actual audio sample position)
-//
-// The waveform shape NEVER changes when BPM/time-sig changes.
-// Only the grid overlay is recomputed.
-
-class WaveformDisplay : public juce::Component,
-                        private juce::Timer
-{
+// Scrolling close waveform: playhead fixed at center, waveform moves.
+// Supports drag-scrub, loop-handle drag, zoom.
+class WaveformDisplay : public juce::Component, private juce::Timer {
 public:
     WaveformDisplay();
     ~WaveformDisplay() override;
 
-    // Set data — call after deck loads a file
     void setWaveformData(const djcore::WaveformPeaks* peaks,
                          const djcore::BeatGrid*      grid,
-                         const std::atomic<double>*   playheadSamplePtr,
+                         const std::atomic<double>*   playheadPtr,
                          int64_t                      totalSamples);
-
     void clear();
 
-    // Zoom: visible region in samples
-    void setVisibleRange(int64_t startSample, int64_t endSample);
-    void zoomIn();
-    void zoomOut();
-    void centerOnPlayhead();
-
-    // Cue / loop markers
-    void setLoopRegion(double startSample, double endSample, bool active);
+    void setLoopRegion(double inSample, double outSample, bool active);
     void setCuePoint(double sample);
 
-    // Callbacks
-    std::function<void(double samplePos)> onSeek;   // user clicked on waveform
+    // Zoom: number of samples visible on each side of the playhead.
+    void setHalfWindow(int64_t halfSamples);
+    int64_t getHalfWindow() const { return halfWindowSamples_; }
 
-    // JUCE Component
-    void paint(juce::Graphics& g) override;
+    void zoomIn();
+    void zoomOut();
+
+    // Position bar text: "Bar 12 | Beat 3/9"
+    juce::String getPositionBarText() const;
+
+    // Callbacks
+    std::function<void()>        onScrubStart;     // drag just started
+    std::function<void(double)>  onScrubEnd;       // drag released → commit seek
+    std::function<void(double)>  onLoopInChanged;  // IN handle dragged
+    std::function<void(double)>  onLoopOutChanged; // OUT handle dragged
+
+    // juce::Component
+    void paint(juce::Graphics&) override;
     void resized() override;
-    void mouseDown(const juce::MouseEvent& e) override;
-    void mouseWheelMove(const juce::MouseEvent& e,
-                        const juce::MouseWheelDetails& wheel) override;
+    void mouseDown(const juce::MouseEvent&) override;
+    void mouseDrag(const juce::MouseEvent&) override;
+    void mouseUp(const juce::MouseEvent&) override;
+    void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void mouseMove(const juce::MouseEvent&) override;
 
 private:
     void timerCallback() override;
 
-    double sampleToX(double sample) const;
-    double xToSample(float x)       const;
-
-    const djcore::WaveformPeaks* peaks_         = nullptr;
-    const djcore::BeatGrid*      grid_          = nullptr;
-    const std::atomic<double>*   playheadPtr_   = nullptr;
-    int64_t                      totalSamples_  = 0;
-
-    int64_t visibleStart_ = 0;
-    int64_t visibleEnd_   = 0;
-    int64_t defaultWindowSamples_ = 44100 * 4;  // 4 seconds at default zoom
-
-    double loopStartSample_ = 0.0;
-    double loopEndSample_   = 0.0;
-    bool   loopActive_      = false;
-    double cuePoint_        = 0.0;
-
-    // Cached waveform pixel data (invalidated on resize / zoom change)
-    juce::Image waveformCache_;
-    bool        cacheValid_ = false;
-    int64_t     cachedRangeStart_ = -1;
-    int64_t     cachedRangeEnd_   = -1;
+    double getDisplayCenter() const;
+    double closupSampleToX(double sample) const;  // relative to component left
+    double closupXToSample(float x)       const;
 
     void paintWaveform(juce::Graphics& g);
     void paintGrid(juce::Graphics& g);
-    void paintMarkers(juce::Graphics& g);
+    void paintLoopRegion(juce::Graphics& g);
+    void paintCue(juce::Graphics& g);
     void paintPlayhead(juce::Graphics& g);
+    void paintPositionBar(juce::Graphics& g);
+
+    bool isNearLoopIn(float x)  const;
+    bool isNearLoopOut(float x) const;
+
+    // Data
+    const djcore::WaveformPeaks* peaks_        = nullptr;
+    const djcore::BeatGrid*      grid_         = nullptr;
+    const std::atomic<double>*   playheadPtr_  = nullptr;
+    int64_t                      totalSamples_ = 0;
+
+    int64_t halfWindowSamples_ = static_cast<int64_t>(44100 * 3); // 3 s each side
+
+    // Loop
+    double loopIn_     = 0.0;
+    double loopOut_    = 0.0;
+    bool   loopActive_ = false;
+    bool   loopSet_    = false;  // IN and OUT both set
+
+    // Cue
+    double cuePoint_ = 0.0;
+
+    // Drag state
+    enum class DragMode { None, Scrubbing, DraggingLoopIn, DraggingLoopOut };
+    DragMode dragMode_    = DragMode::None;
+    float    dragStartX_  = 0.0f;
+    double   dragStartPh_ = 0.0;
+    double   scrubSample_ = 0.0;
+    bool     isScrubbing_ = false;
 };

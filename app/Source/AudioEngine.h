@@ -84,6 +84,11 @@ public:
     const djcore::TrackAnalysis& trackAnalysis()         const { return analysis_; }
     const PlaybackState&         playbackState()         const { return state_; }
 
+    // Manual loop: set IN/OUT without enabling, then call enableLoop()
+    void setManualLoop(double inSample, double outSample);
+    void enableLoop();
+    bool isLooping() const { return state_.looping.load(); }
+
     // juce::AudioSource interface (public)
     void prepareToPlay(int samplesPerBlockExpected, double newSampleRate) override;
     void releaseResources() override;
